@@ -42,18 +42,22 @@
     ```
 
 ## 📁 Project Structure
-│SoilMate/
-├── GUI_run.py # Main entry point
-├── station_config_page.py # Station configuration GUI
-├── manual_control_page.py # Manual device control
-├── test_set_up_page.py # Test stage definition
-├── test_view_page.py # Real-time data display
-├── data_view_page.py # Live raw readings
+SoilMate/
+├── GUI_run.py                   # Main application entry point
+├── calibration_wizard.py        # Manages calibration loading and parsing
+├── station_config_page.py       # GUI for detecting and connecting devices
+├── manual_control_page.py       # Manual control interface for pressure and axial commands
+├── test_set_up_page.py          # UI for configuring test stages (saturation, B test, etc.)
+├── test_view_page.py            # Real-time graphing and test monitoring
+├── data_view_page.py            # Live display of transducer data from SerialPad
 │
-├── device_controllers/ # STDDPC, Load Frame, SerialPad drivers
-├── calibration_wizard.py # Calibration manager
-└── icons/ # App icons
-
+├── device_controllers/          # Device-specific driver logic
+│   ├── sttdpc_controller.py     # STDDPC v2 pressure controller driver
+│   ├── loadframe.py             # LF50 USB initialization and communication
+│   ├── lf50_movement.py         # Axial displacement command builder
+│   └── serial_pad_reader.py     # 8-channel SerialPad ADC reader
+│
+└── icons/                       # Sidebar and button icons
 
 ## ✨ Coming Soon
 - Exportable test reports (CSV, Excel)
