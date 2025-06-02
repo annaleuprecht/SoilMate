@@ -42,8 +42,7 @@
     ```
 
 ## 📁 Project Structure
-SoilMate/
-│
+│SoilMate/
 ├── GUI_run.py # Main entry point
 ├── station_config_page.py # Station configuration GUI
 ├── manual_control_page.py # Manual device control
