@@ -1,66 +1,34 @@
-# SoilMate v2025
+# SoilMate
 
-**SoilMate** is a Python-based graphical user interface (GUI) for automated triaxial testing. The goal of the project is to provide a clean and user-friendly interface for configuring tests, controlling devices, and logging data.
+**SoilMate** is an open-source Python-based GUI for automated triaxial testing of soil specimens. It provides a modular and customizable interface to control pressure controllers, load frames, and SerialPad data acquisition systems.
 
-## 🚧 Current Features
+## Features
 
-- 🔧 **Station Configuration** – Auto-detect and connect to:
-  - LF50 Load Frame
-  - STDDPC v2 Pressure Controllers (x2)
-  - 8-Channel SerialPad
-- 🎛 **Manual Control Page** – Manually send commands for:
-  - Axial displacement
-  - Pressure or volume control
-- 📈 **Data View Page** – Live readouts from transducers on serial pad
-- 🧪 **Test Setup Page** – Define test stages with custom pressure/displacement inputs
-- 📊 **Test View Page** – Real-time graphing during tests, customizable y-axis variables
+- Manual control of pressure and displacement
+- Live data acquisition and graphing
+- Automated testing workflows (Saturation, B-test, Consolidation, Shear)
+- Modular device interface system (PyUSB + Serial)
 
-## 🧰 Hardware Compatibility
+## Supported Devices
 
-- GDS Instruments LF50 Load Frame
-- GDS STDDPC v2 Pressure Controllers (cell and back)
-- GDS SerialPad (8-channel analog)
+- GDS STDDPC v2 Pressure Controllers (via USB)
+- GDS LF50 Load Frame (via USB)
+- GDS SerialPad 8-channel reader (via RS232)
 
-## 📦 Getting Started
+## Legal Disclaimer
 
-> **Note:** Python 3.9+ is recommended.
+This project was developed through independent reverse engineering for the purpose of enabling interoperability with GDS hardware owned by the author.
 
-1. Clone this repository:
-    ```bash
-    git clone https://github.com/yourusername/SoilMate.git
-    cd SoilMate
-    ```
+- No original GDSLab source code, binaries, or proprietary assets are included or used in this repository.
+- All communication protocols were reverse engineered using publicly available tools (e.g., USB capture, serial logs).
+- This project does not clone or redistribute any GDS proprietary features or software.
+- This project is not affiliated with or endorsed by GDS Instruments.
 
-2. Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+Reverse engineering was conducted in accordance with fair use (Canada/US) and fair dealing (UK/EU) principles for educational and non-commercial research purposes.
 
-3. Run the GUI:
-    ```bash
-    python GUI_run.py
-    ```
+## Installation
 
-## 📁 Project Structure
-SoilMate/
-├── GUI_run.py                   # Main application entry point
-├── calibration_wizard.py        # Manages calibration loading and parsing
-├── station_config_page.py       # GUI for detecting and connecting devices
-├── manual_control_page.py       # Manual control interface for pressure and axial commands
-├── test_set_up_page.py          # UI for configuring test stages (saturation, B test, etc.)
-├── test_view_page.py            # Real-time graphing and test monitoring
-├── data_view_page.py            # Live display of transducer data from SerialPad
-│
-├── device_controllers/          # Device-specific driver logic
-│   ├── sttdpc_controller.py     # STDDPC v2 pressure controller driver
-│   ├── loadframe.py             # LF50 USB initialization and communication
-│   ├── lf50_movement.py         # Axial displacement command builder
-│   └── serial_pad_reader.py     # 8-channel SerialPad ADC reader
-│
-└── icons/                       # Sidebar and button icons
-
-## ✨ Coming Soon
-- Exportable test reports (CSV, Excel)
-- `.exe` release for non-technical users
-- Built-in calibration assistant
-- Full test result visualization
+Coming soon — will include steps to:
+- Install required Python packages
+- Set up USB drivers (via Zadig)
+- Run the GUI application
