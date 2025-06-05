@@ -32,3 +32,7 @@ Coming soon — will include steps to:
 - Install required Python packages
 - Set up USB drivers (via Zadig)
 - Run the GUI application
+
+## License
+
+MIT License.
