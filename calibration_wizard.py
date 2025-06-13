@@ -1,9 +1,18 @@
 import os
 import csv
+import json
 
 class CalibrationManager:
-    def __init__(self, cal_dir="calibration_values"):
-        self.calibrations = self.load_from_cal_files(cal_dir)
+    def __init__(self,
+                 serialpad_dir="calibration/serial_pad",
+                 pressure_json_path="calibration/stddpc/pressure_calibrations.json",
+                 log=print):
+        self.log = log
+        self.serialpad_dir = serialpad_dir
+        self.pressure_json_path = pressure_json_path
+
+        self.calibrations = self.load_from_cal_files(self.serialpad_dir)
+        self.pressure_calibrations = self.load_pressure_calibrations()
 
     def get_calibration(self, channel):
         return self.calibrations.get(str(channel), {
@@ -62,3 +71,59 @@ class CalibrationManager:
         if "units" not in calibration:
             calibration["units"] = "units"
         return calibration
+
+    def load_pressure_calibrations(self):
+        if not os.path.exists(self.pressure_json_path):
+            os.makedirs(os.path.dirname(self.pressure_json_path), exist_ok=True)
+            with open(self.pressure_json_path, 'w') as f:
+                json.dump({}, f)
+        with open(self.pressure_json_path, 'r') as f:
+            return json.load(f)
+
+    def get_pressure_calibration(self, serial):
+        if serial not in self.pressure_calibrations:
+            raise ValueError(f"No calibration values found for STDDPC {serial}")
+        return self.pressure_calibrations[serial]
+
+    def set_pressure_calibration(self, serial, values):
+        self.pressure_calibrations[serial] = values
+        self.save_pressure_calibrations()
+
+    def save_pressure_calibrations(self):
+        with open(self.pressure_json_path, 'w') as f:
+            json.dump(self.pressure_calibrations, f, indent=4)
+
+    def get_all_device_serials(self):
+        serials = list(self.pressure_calibrations.keys())
+
+        if self.serialpad_dir:
+            try:
+                for fname in os.listdir(self.serialpad_dir):
+                    if fname.endswith(".cal"):
+                        serial = os.path.splitext(fname)[0]
+                        if serial not in serials:
+                            serials.append(serial)
+            except Exception as e:
+                self.log(f"[!] Failed to scan serialpad cal dir: {e}")
+
+        return sorted(serials)
+
+    def add_pressure_calibration(self, serial, values):
+        self.pressure_calibrations[serial] = values
+        self.save_pressure_calibrations()
+
+    def get_pressure_device_serials(self):
+        return [k for k in self.get_all_device_serials() if k.startswith("GDS") or k.startswith("150")]
+
+    def get_all_transducer_channels(self):
+        return [k for k in self.get_all_device_serials() if k.startswith("ch")]
+
+    def get_transducer_calibration(self, key):
+        return self.get_calibration(key)
+
+    def set_transducer_calibration(self, key, values):
+        self.set_calibration(key, values)
+
+
+
+

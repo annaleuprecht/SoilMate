@@ -1,0 +1,17 @@
+{
+    "GDS15020": {
+        "pressure_quanta": 0.0005414,
+        "pressure_offset": 7.0,
+        "volume_quanta": 0.0626
+    },
+    "GDS12969": {
+        "pressure_quanta": 0.0004185,
+        "pressure_offset": 7.0,
+        "volume_quanta": 0.0626
+    },
+    "GDS15018": {
+        "pressure_quanta": 0.0004173,
+        "pressure_offset": -2.0,
+        "volume_quanta": 0.0626
+    }
+}

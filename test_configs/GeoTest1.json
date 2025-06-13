@@ -1,0 +1,19 @@
+{
+  "sample_id": "GeoTest1",
+  "initial_height": "100",
+  "initial_diameter": "50",
+  "stages": [
+    {
+      "type": "Saturation",
+      "pressure": "50",
+      "back_pressure": "20",
+      "duration": "1",
+      "rate": "",
+      "control_load": false,
+      "hold": true,
+      "axial_mode": "Axial Load (kN)",
+      "axial_target": "",
+      "zero_displacement": false
+    }
+  ]
+}

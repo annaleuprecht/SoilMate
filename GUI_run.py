@@ -3,7 +3,7 @@ import sys
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton,
     QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget, QListWidget, QListWidgetItem,
-    QComboBox, QTextEdit, QGroupBox, QFormLayout, QLineEdit
+    QComboBox, QTextEdit, QGroupBox, QFormLayout, QLineEdit, QMessageBox
 )
 from PyQt5.QtCore import Qt, QSize, QMetaObject, QTimer
 from PyQt5.QtGui import QFont, QIcon, QPixmap
@@ -18,7 +18,8 @@ from device_controllers.serial_pad_reader import SerialPadReader  # You’ll nee
 from triaxial_test_manager import TriaxialTestManager
 from test_set_up_page import TestSetupPage
 from test_view_page import TestViewPage
-
+from device_settings_page import DeviceSettingsPage
+from calibration_popup import CalibrationInputDialog
 
 
 class HomePage(QWidget):
@@ -64,7 +65,6 @@ class HomePage(QWidget):
             self.status_label.setText("Status: Error")
             self.log_area.append(f"[Exception] {repr(e)}")
 
-
     def connect_pressure_controller(self):
         self.log_message("[*] Connecting to STTDPC pressure controller...")
 
@@ -73,106 +73,24 @@ class HomePage(QWidget):
             self.log_message("[✗] No unclaimed FTDI devices.")
             return
 
-        success = self.pressure_controller.connect(usb_device=usb_dev)
+        controller = STTDPCController(log=self.log_message, calibration_manager=self.main_window.calibration_manager)
+        success = controller.connect(usb_dev)
+
         if success:
-            self.log_message("[✓] Pressure controller connected.")
-            self.main_window.sttdpc_controller = self.pressure_controller
+            serial = controller.serial
+            self.log_message(f"[✓] Pressure controller connected (Serial: {serial})")
+
+            # Assign to cell or back depending on what's already set
+            if not self.main_window.cell_pressure_controller:
+                self.main_window.cell_pressure_controller = controller
+                self.log_message(f"[✓] Assigned as Cell Pressure Controller.")
+            elif not self.main_window.back_pressure_controller:
+                self.main_window.back_pressure_controller = controller
+                self.log_message(f"[✓] Assigned as Back Pressure Controller.")
+            else:
+                self.log_message(f"[!] Both controllers already connected. Extra device not assigned.")
         else:
             self.log_message("[✗] Failed to connect pressure controller.")
-
-class ManualControlPage(QWidget):
-    def __init__(self, lf_controller=None, sttdpc_controller=None):
-        super().__init__()
-        self.lf_controller = lf_controller
-        self.sttdpc_controller = sttdpc_controller
-
-        layout = QVBoxLayout()
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(25)
-
-        layout.addWidget(self.create_axial_position_box())
-        layout.addWidget(self.create_pressure_box())
-        layout.addWidget(self.create_volume_box())
-
-        self.setLayout(layout)
-
-    def create_axial_position_box(self):
-        group = QGroupBox("Axial Position (Load Frame)")
-        vbox = QVBoxLayout()
-
-        self.axial_input = QLineEdit()
-        self.axial_input.setPlaceholderText("Enter target position (mm)")
-        send_btn = QPushButton("Send Axial Command")
-        send_btn.clicked.connect(self.send_axial_position)
-
-        vbox.addWidget(QLabel("Target Position:"))
-        vbox.addWidget(self.axial_input)
-        vbox.addWidget(send_btn)
-
-        group.setLayout(vbox)
-        return group
-
-    def create_pressure_box(self):
-        group = QGroupBox("Pressure Control (STDDPC)")
-        vbox = QVBoxLayout()
-
-        self.pressure_input = QLineEdit()
-        self.pressure_input.setPlaceholderText("Enter target pressure (kPa)")
-        send_btn = QPushButton("Send Pressure Command")
-        send_btn.clicked.connect(self.send_pressure)
-
-        vbox.addWidget(QLabel("Target Pressure:"))
-        vbox.addWidget(self.pressure_input)
-        vbox.addWidget(send_btn)
-
-        group.setLayout(vbox)
-        return group
-
-    def create_volume_box(self):
-        group = QGroupBox("Volume Control (STDDPC)")
-        vbox = QVBoxLayout()
-
-        self.volume_input = QLineEdit()
-        self.volume_input.setPlaceholderText("Enter target volume (mm³)")
-        send_btn = QPushButton("Send Volume Command")
-        send_btn.clicked.connect(self.send_volume)
-
-        vbox.addWidget(QLabel("Target Volume:"))
-        vbox.addWidget(self.volume_input)
-        vbox.addWidget(send_btn)
-
-        group.setLayout(vbox)
-        return group
-
-    def send_axial_position(self):
-        if not self.lf_controller or not self.lf_controller.device:
-            QMessageBox.warning(self, "Error", "Load Frame not connected.")
-            return
-        try:
-            mm = float(self.axial_input.text())
-            self.lf_controller.send_displacement(mm)
-        except ValueError:
-            QMessageBox.warning(self, "Input Error", "Please enter a valid number.")
-
-    def send_pressure(self):
-        if not self.sttdpc_controller or not self.sttdpc_controller.dev:
-            QMessageBox.warning(self, "Error", "Pressure Controller not connected.")
-            return
-        try:
-            kpa = float(self.pressure_input.text())
-            self.sttdpc_controller.send_pressure(kpa)
-        except ValueError:
-            QMessageBox.warning(self, "Input Error", "Please enter a valid number.")
-
-    def send_volume(self):
-        if not self.sttdpc_controller or not self.sttdpc_controller.dev:
-            QMessageBox.warning(self, "Error", "Pressure Controller not connected.")
-            return
-        try:
-            mm3 = float(self.volume_input.text())
-            self.sttdpc_controller.send_volume(mm3)
-        except ValueError:
-            QMessageBox.warning(self, "Input Error", "Please enter a valid number.")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -181,10 +99,11 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1000, 600)
 
         self.lf_controller = None
-        self.sttdpc_controller = None
-        self.manual_page = None 
-        self.test_manager = None
+        self.back_pressure_controller = None
+        self.cell_pressure_controller = None
         self.serial_pad = None
+        self.manual_page = None
+        self.test_manager = None
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -236,6 +155,7 @@ class MainWindow(QMainWindow):
         terminal_icon = QIcon("icons/terminal.png")
         move_icon = QIcon("icons/move.png")
         data_view_icon = QIcon("icons/message-square-text.png")
+        data_settings_icon = QIcon("icons/settings.png")
 
         self.sidebar.addItem(QListWidgetItem(home_icon, "Dashboard"))
         self.sidebar.addItem(QListWidgetItem(wrench_icon, "Station Configuration"))
@@ -243,21 +163,29 @@ class MainWindow(QMainWindow):
         self.sidebar.addItem(QListWidgetItem(chart_icon, "Test View"))
         self.sidebar.addItem(QListWidgetItem(move_icon, "Manual Control"))
         self.sidebar.addItem(QListWidgetItem(data_view_icon, "Data View"))
+        self.sidebar.addItem(QListWidgetItem(data_settings_icon, "Device Settings"))
 
         self.sidebar.setFixedWidth(210)
         main_layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
+        self.calibration_manager = CalibrationManager(
+            serialpad_dir="calibration/serial_pad",
+            pressure_json_path="calibration/stddpc/pressure_calibrations.json",
+            log=self.log
+        )
         self.home_page = HomePage()
         self.config_page = StationConfigPage(self, log=self.log)
         self.setup_page = TestSetupPage(self)
         self.view_page = TestViewPage()
-        self.calibration_manager = CalibrationManager(cal_dir="calibration_values")
-        self.data_view_page = DataViewPage(self.calibration_manager, log=self.config_page.log)
         self.manual_page = ManualControlPage(
-            lf_controller=None,
-            sttdpc_controller=None,
+            lf_controller=self.lf_controller,
+            back_pressure_controller=self.back_pressure_controller,
+            cell_pressure_controller=self.cell_pressure_controller,
+            log=self.log
         )
+        self.data_view_page = DataViewPage(self.calibration_manager, log=self.config_page.log)
+        self.device_settings_page = DeviceSettingsPage(self.calibration_manager, log=self.log)
 
         self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.config_page)
@@ -265,23 +193,25 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.view_page)
         self.stack.addWidget(self.manual_page)
         self.stack.addWidget(self.data_view_page)
+        self.stack.addWidget(self.device_settings_page)
 
         main_layout.addWidget(self.stack)
         self.sidebar.currentRowChanged.connect(self.display_page)
-        self.stddpc_controller = None
+        self.sttdpc_controller = None
 
     def display_page(self, index):
         self.stack.setCurrentIndex(index)
 
 
     def start_test(self, test_config):
-        if not (self.lf_controller and self.sttdpc_controller and self.serial_pad):
+        if not (self.lf_controller and self.cell_pressure_controller and self.back_pressure_controller and self.serial_pad):
             self.log("[✗] All devices must be connected before starting a test.")
             return
 
         self.test_manager = TriaxialTestManager(
             lf_controller=self.lf_controller,
-            sttdpc_controller=self.sttdpc_controller,
+            cell_pressure_controller=self.cell_pressure_controller,
+            back_pressure_controller=self.back_pressure_controller,
             serial_pad=self.serial_pad,
             test_config=test_config,
             log=self.log
@@ -291,7 +221,6 @@ class MainWindow(QMainWindow):
         self.test_manager.test_finished.connect(lambda: self.log("[✓] Test finished!"))
 
         self.test_manager.start()
-        self.stack.setCurrentWidget(self.view_page)  # Optional: switch to test view
 
     def log(self, message):
         print(message)

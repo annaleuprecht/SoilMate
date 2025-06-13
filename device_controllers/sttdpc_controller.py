@@ -4,60 +4,47 @@ import usb.util
 import time
 
 class STTDPCController:
-    def __init__(self, log=print):
+    def __init__(self, log=print, calibration_manager=None):
         self.dev = None
         self.log = log
-        self.out_ep = 0x02
+        self.ep_out = 0x02  # FTDI Bulk OUT endpoint
+        self.calibration = None
+        self.serial = None
+        self.calibration_manager = calibration_manager
 
-    def connect(self, usb_device=None):
-        try:
-            self.dev = usb_device or usb.core.find(idVendor=0x0403, idProduct=0x6001)
-            if self.dev is None:
-                self.log("[✗] STTDPC not found.")
-                return False
+    def connect(self, dev):
+        self.dev = dev
+        self.serial = usb.util.get_string(dev, dev.iSerialNumber)
 
-            self.dev.set_configuration()
-            usb.util.claim_interface(self.dev, 0)
-            self.device = self.dev  # <--- ADD THIS LINE
+        if self.calibration_manager is None:
+            raise ValueError("Calibration manager not provided")
 
-            def write(data):
-                self.dev.write(self.out_ep, data, timeout=100)
+        self.calibration = self.calibration_manager.get_pressure_calibration(self.serial)
 
-            # FTDI init sequence...
-            write(bytes.fromhex("a0 03 00 00 00 00 00 00 00"))
-            time.sleep(0.02)
-            write(bytes.fromhex("a0 01 00 00 00 00 00 00 00"))
-            time.sleep(0.02)
-            write(bytes.fromhex("a0 02 00 00 00 00 00 00 00"))
-            time.sleep(0.02)
-            write(bytes.fromhex("a0 06 00 00 00 00 00 00 00"))
-            time.sleep(0.02)
+        self._ftdi_init_sequence(self.dev)
 
-            self.log("[✓] STTDPC connected successfully.")
+        # Setup bulk endpoints
+        cfg = self.dev.get_active_configuration()
+        intf = cfg[(0, 0)]
+        for ep in intf:
+            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT:
+                self.bulk_out = ep
+            elif usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
+                self.bulk_in = ep
 
-            product = usb.util.get_string(self.dev, self.dev.iProduct)
-            serial = usb.util.get_string(self.dev, self.dev.iSerialNumber)
-            self.log(f"[Debug] Connected to product: {product}, serial: {serial}")
+        if not hasattr(self, "bulk_out") or not hasattr(self, "bulk_in"):
+            raise ValueError("Could not find bulk endpoints")
 
-            return True
-
-        except Exception as e:
-            self.log(f"[✗] Connection failed: {e}")
-            return False
-
-##    def encode_signed_24bit_le(self, value):
-##        """Encodes a signed 24-bit integer as a 3-byte little-endian value."""
-##        if not -8388608 <= value <= 8388607:
-##            raise ValueError("Value out of 24-bit signed range.")
-##        if value < 0:
-##            value = (1 << 24) + value  # two's complement for negative values
-##        return value.to_bytes(3, byteorder='little')
+        self.log(f"[✓] STDDPC initialized (serial: {self.serial})")
+        return True
 
     def send_pressure(self, pressure_kpa):
         # From stddpc_usb_payload_user_input.py
-        target_count = round((pressure_kpa + 7) / 5.414e-4)
-        #target_bytes = self.encode_signed_24bit_le(target_count)
-        
+        quanta = self.calibration["pressure_quanta"]
+        offset = self.calibration["pressure_offset"]
+        self.log(f"Offset: {offset}")
+        target_count = round((pressure_kpa + offset) / quanta)
+     
         payload_part_2 = bytearray(10)
         payload_part_2[0:2] = (0x0200).to_bytes(2, 'little')
         payload_part_2[2:4] = (1).to_bytes(2, 'little')  # mode
@@ -69,7 +56,11 @@ class STTDPCController:
         crc = self.calculate_crc(payload_part_2)
         full_payload = payload_part_1 + payload_part_2 + crc
         self.log(f"[→] Sending pressure payload: {full_payload.hex()}")
-        self.dev.write(self.out_ep, full_payload, timeout=100)
+        if not self.ep_out:
+            self.log("[✗] Cannot send: OUT endpoint not initialized.")
+            return
+
+        self.dev.write(self.ep_out, full_payload, timeout=100)
         self.log(f"[→] Sent pressure command: {pressure_kpa} kPa")
 
     def send_volume(self, volume_mm3):
@@ -83,9 +74,10 @@ class STTDPCController:
         payload_part_2[6:9] = full_count_bytes[0:3]
         payload_part_2[9] = 0x00
 
-        self.dev.write(self.out_ep, bytes.fromhex("67 64 73 0a"))
-        self.dev.write(self.out_ep, payload_part_2)
-        self.dev.write(self.out_ep, self.calculate_crc(payload_part_2))
+        self.dev.write(self.ep_out, bytes.fromhex("67 64 73 0a"), timeout=100)
+        self.dev.write(self.ep_out, payload_part_2, timeout=100)
+        self.dev.write(self.ep_out, self.calculate_crc(payload_part_2), timeout=100)
+
         self.log(f"[→] Sent volume command: {volume_mm3} mm³")
 
     def calculate_crc(self, payload):
@@ -102,3 +94,47 @@ class STTDPCController:
             else:
                 crc <<= 1
         return crc & 0xFFFF
+
+    def _ftdi_init_sequence(self, dev):
+        def ct(bmRequestType, bRequest, wValue, wIndex, data_or_wLength, label):
+            self.log(f"[TX] {label}")
+            try:
+                result = dev.ctrl_transfer(bmRequestType, bRequest, wValue, wIndex, data_or_wLength)
+                self.log(f"[✓] Success: {label}")
+                return result
+            except usb.core.USBError as e:
+                self.log(f"[✗] Failed: {label} - {e}")
+                return None
+
+        dev.set_configuration()
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0, 0)]
+        usb.util.claim_interface(dev, intf.bInterfaceNumber)
+
+        time.sleep(0.1)
+        ct(0x80, 6, 0x0100, 0x0000, 18, "GET_DESCRIPTOR: DEVICE")
+        ct(0x80, 6, 0x0200, 0x0000, 32, "GET_DESCRIPTOR: CONFIGURATION")
+        ct(0x00, 9, 0x0001, 0x0000, None, "SET_CONFIGURATION")
+
+        time.sleep(0.1)
+        ct(0x40, 0x00, 0x0000, 0x0000, None, "FTDI: Reset (Purge RX/TX)")
+        ct(0xC0, 0x05, 0x0000, 0x0000, 2, "FTDI: GetModemStat")
+        ct(0x40, 0x00, 0x0000, 0x0000, None, "FTDI: Reset (Repeat)")
+        ct(0xC0, 0x05, 0x0000, 0x0000, 2, "FTDI: GetModemStat (Repeat)")
+        ct(0x40, 0x02, 0x0000, 0x0100, None, "FTDI: SetFlowCtrl (RTS/CTS)")
+        ct(0x40, 0x01, 0x0300, 0x0000, None, "FTDI: ModemCtrl")
+        ct(0x40, 0x04, 0x0008, 0x0000, None, "FTDI: SetData")
+        ct(0x40, 0x03, 0x0002, 0x0001, None, "FTDI: SetBaudRate (9600?)")  # ← Confirm this value
+
+        for i in range(10):
+            ct(0x40, 0x00, 0x0000, 0x0000, None, f"FTDI: Extra Reset #{i+1}")
+            time.sleep(0.05)
+
+        self.log("[✓] FTDI/USB Init Sequence Complete.")
+
+    def stop(self):
+        stop_cmd = bytes.fromhex("ffffffff676473020320b098ffffffffffffffff")
+        self.dev.write(self.ep_out, stop_cmd, timeout=100)
+        self.log("[→] Sent STDDPC stop command.")
+
+

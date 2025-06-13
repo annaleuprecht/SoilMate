@@ -7,10 +7,11 @@ class TriaxialTestManager(QObject):
     reading_updated = pyqtSignal(dict)
     test_finished = pyqtSignal()
 
-    def __init__(self, lf_controller, sttdpc_controller, serial_pad, test_config, log=print):
+    def __init__(self, lf_controller, cell_pressure_controller, back_pressure_controller, serial_pad, test_config, log=print):
         super().__init__()
         self.lf = lf_controller
-        self.pc = sttdpc_controller
+        self.cell_pc = cell_pressure_controller
+        self.back_pc = back_pressure_controller
         self.serial_pad = serial_pad
         self.config = test_config
         self.log = log
@@ -38,13 +39,13 @@ class TriaxialTestManager(QObject):
         self.log(f"[→] Starting stage: {stage['name']}")
         self.stage_changed.emit(stage["name"])
 
-        # Cell pressure
-        if "pressure_kpa" in stage:
-            self.pc.send_pressure(stage["pressure_kpa"])
+        if "pressure_kpa" in stage and self.cell_pc:
+            self.cell_pc.send_pressure(stage["pressure_kpa"])
 
-        # Back pressure (volume controller)
-        if "back_pressure_kpa" in stage:
-            self.pc.send_volume(stage["back_pressure_kpa"] * 100)  # Placeholder logic
+        if "back_pressure_kpa" in stage and self.back_pc:
+            # Volume = back pressure (kPa) × 100 (temporary conversion for now)
+            volume_mm3 = stage["back_pressure_kpa"] * 100
+            self.back_pc.send_volume(volume_mm3)
 
         # Axial control (shear stage)
         if stage.get("control_load") and "axial_control" in stage:
@@ -77,15 +78,33 @@ class TriaxialTestManager(QObject):
             "volume": None,
             "displacement": None,
             "transducers": [],
+            "cell_pressure": None,
+            "back_pressure": None,
+            "pore_pressure": None,
+            "axial_displacement": None,
+            "cell_volume": None,
+            "back_volume": None,
         }
 
         try:
             if self.serial_pad:
-                readings["transducers"] = self.serial_pad.read_channels()
+                channels = self.serial_pad.read_channels()
+                readings["transducers"] = channels
+
+                if channels:
+                    readings["axial_load"] = channels[0]                 # kN
+                    readings["pore_pressure"] = channels[1]              # kPa
+                    readings["axial_displacement"] = channels[2]         # mm
+                    readings["local_axial_1_mv"] = channels[3]           # mV
+                    readings["local_axial_2_mv"] = channels[4]           # mV
+                    readings["local_radial_mv"] = channels[5]            # mV
+
         except Exception as e:
             self.log(f"[!] Error during reading: {e}")
 
         self.data_log.append(readings)
+        self.shared_data = readings
+        print("[Graph Debug]", readings)
         self.reading_updated.emit(readings)
 
         if duration and elapsed >= duration:

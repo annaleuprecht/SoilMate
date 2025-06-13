@@ -1,8 +1,9 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton,
-    QHBoxLayout, QComboBox, QScrollArea, QFormLayout, QGroupBox, QCheckBox
+    QHBoxLayout, QComboBox, QScrollArea, QFormLayout, QGroupBox, QCheckBox, QFileDialog
 )
 from PyQt5.QtCore import Qt
+import json
 
 class TestSetupPage(QWidget):
     def __init__(self, main_window):
@@ -54,19 +55,29 @@ class TestSetupPage(QWidget):
         self.start_button.clicked.connect(self._start_test)
         layout.addWidget(self.start_button)
 
+        self.save_button = QPushButton("💾 Save Config")
+        self.save_button.clicked.connect(self.save_config)
+        layout.addWidget(self.save_button)
+
+        self.load_button = QPushButton("📂 Load Config")
+        self.load_button.clicked.connect(self.load_config)
+        layout.addWidget(self.load_button)
+
         self.setLayout(layout)
 
     def update_device_status(self):
         status_text = "<b>Device Status:</b><br>"
         status_text += f"Load Frame: {'Connected ✅' if self.main_window.lf_controller else 'Not Connected ❌'}<br>"
-        status_text += f"Pressure Controller: {'Connected ✅' if self.main_window.sttdpc_controller else 'Not Connected ❌'}<br>"
+        status_text += f"Cell Pressure Controller: {'Connected ✅' if self.main_window.cell_pressure_controller else 'Not Connected ❌'}<br>"
+        status_text += f"Back Pressure Controller: {'Connected ✅' if self.main_window.back_pressure_controller else 'Not Connected ❌'}<br>"
         status_text += f"SerialPad: {'Connected ✅' if self.main_window.serial_pad else 'Not Connected ❌'}<br>"
         self.status_label.setText(status_text)
 
     def add_stage(self):
         self.stage_count += 1
         stage_box = QGroupBox(f"Stage {self.stage_count}")
-        outer_layout = QVBoxLayout()
+        outer_layout = QVBoxLayout()  # 👈 this must come first
+
         form = QFormLayout()
 
         stage_type = QComboBox()
@@ -87,13 +98,12 @@ class TestSetupPage(QWidget):
         form.addRow(control_load_checkbox)
         form.addRow(hold_checkbox)
 
-        # Automated docking UI (hidden by default)
+        # --- Automated docking section ---
         docking_group = QGroupBox("Automated Docking")
         docking_form = QFormLayout()
 
         axial_mode = QComboBox()
         axial_mode.addItems(["Axial Load (kN)", "Axial Displacement (mm)"])
-
         axial_target = QLineEdit()
         zero_displacement = QCheckBox("Zero displacement value")
 
@@ -105,12 +115,20 @@ class TestSetupPage(QWidget):
 
         control_load_checkbox.toggled.connect(lambda checked: docking_group.setVisible(checked))
 
+        # --- Remove button ---
+        remove_btn = QPushButton("🗑 Remove This Stage")
+        remove_btn.setStyleSheet("color: red; font-weight: bold;")
+        remove_btn.clicked.connect(lambda: self.remove_stage(stage_box))
+
         outer_layout.addLayout(form)
         outer_layout.addWidget(docking_group)
+        outer_layout.addWidget(remove_btn)
+
         stage_box.setLayout(outer_layout)
         self.stage_area.addWidget(stage_box)
 
         self.stage_widgets.append({
+            "groupbox": stage_box,
             "type": stage_type,
             "pressure": pressure_input,
             "back_pressure": back_pressure_input,
@@ -171,4 +189,90 @@ class TestSetupPage(QWidget):
             "diameter_mm": self.diameter_input.text(),
             "stages": stages
         }
+
+        if not (self.main_window.lf_controller and
+                self.main_window.cell_pressure_controller and
+                self.main_window.back_pressure_controller and
+                self.main_window.serial_pad):
+            self.status_label.setText("[✗] All devices must be connected before starting the test.")
+            return
+
         self.main_window.start_test(config)
+
+    def remove_stage(self, stage_box):
+        for i, w in enumerate(self.stage_widgets):
+            if w["groupbox"] == stage_box:
+                self.stage_area.removeWidget(stage_box)
+                stage_box.setParent(None)
+                del self.stage_widgets[i]
+                break
+
+        # Optional: Renumber stages
+        for i, w in enumerate(self.stage_widgets):
+            w["groupbox"].setTitle(f"Stage {i + 1}")
+
+    def save_config(self):
+        config = {
+            "sample_id": self.sample_input.text(),
+            "initial_height": self.height_input.text(),
+            "initial_diameter": self.diameter_input.text(),
+            "stages": []
+        }
+
+        for stage in self.stage_widgets:
+            stage_data = {
+                "type": stage["type"].currentText(),
+                "pressure": stage["pressure"].text(),
+                "back_pressure": stage["back_pressure"].text(),
+                "duration": stage["duration"].text(),
+                "rate": stage["rate"].text(),
+                "control_load": stage["control_load"].isChecked(),
+                "hold": stage["hold"].isChecked(),
+                "axial_mode": stage["axial_mode"].currentText(),
+                "axial_target": stage["axial_target"].text(),
+                "zero_displacement": stage["zero_displacement"].isChecked()
+            }
+            config["stages"].append(stage_data)
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save Test Config", "", "JSON Files (*.json)")
+        if path:
+            with open(path, "w") as f:
+                json.dump(config, f, indent=2)
+
+    def load_config(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Test Config", "", "JSON Files (*.json)")
+        if not path:
+            return
+
+        with open(path, "r") as f:
+            config = json.load(f)
+
+        self.sample_input.setText(config.get("sample_id", ""))
+        self.height_input.setText(config.get("initial_height", ""))
+        self.diameter_input.setText(config.get("initial_diameter", ""))
+
+        # Clear existing stages
+        for w in self.stage_widgets:
+            self.stage_area.removeWidget(w["groupbox"])
+            w["groupbox"].setParent(None)
+        self.stage_widgets = []
+        self.stage_count = 0
+
+        # Add stages from file
+        for stage_data in config.get("stages", []):
+            self.add_stage()
+            stage = self.stage_widgets[-1]
+
+            stage["type"].setCurrentText(stage_data.get("type", "Saturation"))
+            stage["pressure"].setText(stage_data.get("pressure", ""))
+            stage["back_pressure"].setText(stage_data.get("back_pressure", ""))
+            stage["duration"].setText(stage_data.get("duration", ""))
+            stage["rate"].setText(stage_data.get("rate", ""))
+            stage["control_load"].setChecked(stage_data.get("control_load", False))
+            stage["hold"].setChecked(stage_data.get("hold", False))
+            stage["axial_mode"].setCurrentText(stage_data.get("axial_mode", "Axial Load (kN)"))
+            stage["axial_target"].setText(stage_data.get("axial_target", ""))
+            stage["zero_displacement"].setChecked(stage_data.get("zero_displacement", False))
+
+
+
