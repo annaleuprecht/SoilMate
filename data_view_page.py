@@ -1,50 +1,153 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QFormLayout, QLabel, QLineEdit
-from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import (
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
+    QLineEdit, QSizePolicy, QScrollArea, QFrame
+)
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
+
+
+class MetricCard(QGroupBox):
+    """A small card with a title and a read-only value + unit."""
+    def __init__(self, title: str, unit: str = "", parent=None):
+        super().__init__(title, parent)
+        self.setObjectName("MetricCard")
+
+        row = QHBoxLayout()
+        row.setContentsMargins(12, 10, 12, 12)
+        row.setSpacing(8)
+
+        self.value = QLineEdit("—")
+        self.value.setReadOnly(True)
+        self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.value.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.value.setObjectName("MetricValue")
+
+        unit_lbl = QLabel(unit)
+        unit_lbl.setObjectName("MetricUnit")
+        unit_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        row.addWidget(self.value)
+        row.addWidget(unit_lbl)
+        self.setLayout(row)
+
+    def set_value(self, v):
+        self.value.setText(str(v))
+
 
 class DataViewPage(QWidget):
-    def __init__(self, calibration_manager, log=print):
-        super().__init__()
-        self.serial_pad = None  # set later via .set_serial_pad()
+    """
+    Pretty Data View:
+      - Title header (matches Test Set Up)
+      - Grid of QGroupBox 'cards' (two columns, responsive)
+      - Call set_values({...}) to update readings
+    """
+    def __init__(self, calibration_manager=None, parent=None, log=None):
+        super().__init__(parent)
         self.calibration_manager = calibration_manager
-        self.log = log
+        self.log = log or (lambda *a, **k: None)
 
-        self.fields = {}
+        self.setFont(QFont("Segoe UI", 12))
 
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Live SerialPad Channel Readings"))
+        # -------- Title bar --------
+        title_bar = QHBoxLayout()
+        title = QLabel("Data View")
+        title.setObjectName("TitleLabel")
+        title_bar.addWidget(title)
+        title_bar.addStretch(1)
 
-        self.form = QFormLayout()
-        for ch in range(8):
-            field = QLineEdit()
-            field.setReadOnly(True)
+        # -------- Card grid in a scroll area --------
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
 
-            cal = self.calibration_manager.get_calibration(ch)
-            units = cal.get("units", "units")
-            label = cal.get("label", f"Channel {ch}")
+        grid_wrap = QWidget()
+        self.grid = QGridLayout(grid_wrap)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(16)
+        self.grid.setVerticalSpacing(12)
 
-            self.form.addRow(f"{label} ({units})", field)
-            self.fields[ch] = field
+        scroll.setWidget(grid_wrap)
 
-        layout.addLayout(self.form)
-        self.setLayout(layout)
+        # Which channels to show (name -> unit)
+        channels = [
+            ("Axial Load", "kN"),
+            ("Pore Pressure", "kPa"),
+            ("Axial Displacement", "mm"),
+            ("Local Axial 1", "mV"),
+            ("Local Axial 2", "mV"),
+            ("Local Radial", "mV"),
+            ("Unused 1", "mV"),
+            ("Unused 2", "mV"),
 
-        # Start polling
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_readings)
-        self.timer.start(1000)
+            ("Cell Pressure", "kPa"),
+            ("Cell Volume", "mm³"),
+            ("Back Pressure", "kPa"),
+            ("Back Volume", "mm³"),
+        ]
 
-    def set_serial_pad(self, serial_pad_reader):
-        self.serial_pad = serial_pad_reader
+        # Build cards (2 columns)
+        self.cards = {}
+        for i, (name, unit) in enumerate(channels):
+            card = MetricCard(name, unit)
+            r, c = divmod(i, 2)     # two columns
+            self.grid.addWidget(card, r, c)
+            self.cards[name] = card
 
-    def update_readings(self):
-        if not self.serial_pad:
-            return  # Don't update unless SerialPad is connected
-        try:
-            values = self.serial_pad.read_channels()
-            for ch, val in enumerate(values):
-                if val is not None:
-                    self.fields[ch].setText(f"{val:.3f}")
-                else:
-                    self.fields[ch].setText("--")
-        except Exception as e:
-            self.log(f"[✗] Failed to update readings: {e}")
+        # -------- Page layout --------
+        page = QVBoxLayout(self)
+        page.setContentsMargins(12, 12, 12, 12)
+        page.setSpacing(10)
+        page.addLayout(title_bar)
+        page.addWidget(scroll)
+
+        # -------- Styling --------
+        self.setStyleSheet("""
+            QWidget { font-size: 18px; }  /* match the rest of the app */
+
+            QLabel#TitleLabel {
+                font-size: 24px;
+                font-weight: 600;
+            }
+
+            /* Card look */
+            QGroupBox#MetricCard {
+                border: 1px solid #dddddd;
+                border-radius: 8px;
+                margin-top: 10px;     /* space for title */
+                background: #ffffff;
+            }
+            QGroupBox#MetricCard::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                top: -2px;
+                padding: 0 4px;
+                color: #333;
+                font-weight: 600;
+            }
+
+            /* Value field */
+            QLineEdit#MetricValue {
+                min-height: 30px;
+                padding: 4px 8px;
+                background: #fafafa;
+                border: 1px solid #dcdcdc;
+                border-radius: 6px;
+            }
+
+            QLabel#MetricUnit {
+                padding-left: 6px;
+                color: #555;
+            }
+        """)
+
+    # ----- public API -----
+    def set_value(self, name: str, value):
+        """Update a single channel by display name."""
+        card = self.cards.get(name)
+        if card:
+            card.set_value(value)
+
+    def set_values(self, mapping: dict):
+        """Bulk update: {'Axial Load': 12.34, 'Pore Pressure': 100.2, ...}"""
+        for k, v in mapping.items():
+            self.set_value(k, v)

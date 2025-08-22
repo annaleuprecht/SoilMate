@@ -1,140 +1,148 @@
+# Shim for STDDPC v2: keeps the old GUI-facing API, delegates to FTDI impl.
+# Place at: device_controllers/sttdpc_controller.py
 
-import usb.core
-import usb.util
-import time
+from typing import Optional, Any
+import usb.util  # only needed if GUI still passes a libusb device object
+
+# ⬇️ UPDATE this import/path/class to your actual FTDI controller
+# e.g. from ftd2xx_controllers.stddpc_ftd2xx_controller import STDDPC_FTDI_HandleController
+from ftd2xx_controllers.stddpc_ftd2xx_controller import STDDPC_FTDI_HandleController
+from ctypes import c_void_p
+
+def _serial_from_usb_dev(dev: Any) -> str:
+    """Extract serial from a legacy PyUSB device object."""
+    return usb.util.get_string(dev, dev.iSerialNumber)
+
 
 class STTDPCController:
+    """
+    Thin shim that delegates to an attached backend (FTDI/PyUSB/etc.).
+    Quiet readiness checks; no '[✗]' logging from here.
+    """
+
     def __init__(self, log=print, calibration_manager=None):
-        self.dev = None
+        self.driver = None
         self.log = log
-        self.ep_out = 0x02  # FTDI Bulk OUT endpoint
-        self.calibration = None
-        self.serial = None
         self.calibration_manager = calibration_manager
+        # expose h on the shim for any legacy code that looks here
+        self.h = None
 
-    def connect(self, dev):
-        self.dev = dev
-        self.serial = usb.util.get_string(dev, dev.iSerialNumber)
+    # --- attach already-connected backend ---
+    def attach_driver(self, backend):
+        self.driver = backend
+        try:
+            self.h = getattr(backend, "h", None)
+        except Exception:
+            self.h = None
 
-        if self.calibration_manager is None:
-            raise ValueError("Calibration manager not provided")
+    # --- optional: pass-through connect so old code still works ---
+    def connect(self, serial: str):
+        if self.driver is None:
+            try:
+                from ftd2xx_controllers.stddpc_ftd2xx_controller import STDDPC_FTDI_HandleController
+            except Exception as e:
+                self.log(f"[!] Could not import FTDI backend: {e}")
+                return False
+            self.driver = STDDPC_FTDI_HandleController(
+                log=self.log,
+                calibration_manager=self.calibration_manager,
+            )
+        ok = False
+        try:
+            ok = bool(self.driver.connect(serial))
+        except Exception as e:
+            self.log(f"[!] STDDPC shim connect failed: {e}")
+            ok = False
+        # mirror handle for any legacy checks
+        try:
+            self.h = getattr(self.driver, "h", None)
+        except Exception:
+            self.h = None
+        return ok
 
-        self.calibration = self.calibration_manager.get_pressure_calibration(self.serial)
+    # --- quiet readiness ---
+    def _unwrap(self):
+        return self.driver or self
 
-        self._ftdi_init_sequence(self.dev)
+    def is_ready(self) -> bool:
+        d = self._unwrap()
+        h = getattr(d, "h", None)
+        if not (isinstance(h, c_void_p) and bool(h)):
+            return False
+        # prefer backend's is_ready if present
+        f = getattr(d, "is_ready", None)
+        try:
+            return bool(f()) if callable(f) else True
+        except Exception:
+            return True
 
-        # Setup bulk endpoints
-        cfg = self.dev.get_active_configuration()
-        intf = cfg[(0, 0)]
-        for ep in intf:
-            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT:
-                self.bulk_out = ep
-            elif usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
-                self.bulk_in = ep
-
-        if not hasattr(self, "bulk_out") or not hasattr(self, "bulk_in"):
-            raise ValueError("Could not find bulk endpoints")
-
-        self.log(f"[✓] STDDPC initialized (serial: {self.serial})")
+    def _ensure_ready(self, action: str) -> bool:
+        if not self.is_ready():
+            try:
+                self.log(f"[dbg] STDDPC shim not ready — {action} skipped.")
+            except Exception:
+                pass
+            return False
         return True
 
-    def send_pressure(self, pressure_kpa):
-        # From stddpc_usb_payload_user_input.py
-        quanta = self.calibration["pressure_quanta"]
-        offset = self.calibration["pressure_offset"]
-        self.log(f"Offset: {offset}")
-        target_count = round((pressure_kpa + offset) / quanta)
-     
-        payload_part_2 = bytearray(10)
-        payload_part_2[0:2] = (0x0200).to_bytes(2, 'little')
-        payload_part_2[2:4] = (1).to_bytes(2, 'little')  # mode
-        payload_part_2[4:6] = (0).to_bytes(2, 'little')  # channel
-        full_count_bytes = target_count.to_bytes(4, 'little', signed=True)
-        payload_part_2[6:10] = full_count_bytes  # includes correct MSB for sign
+    # --- delegates (no '[✗]' logging) ---
+    def send_pressure(self, kpa: float):
+        if not self._ensure_ready("send_pressure"):
+            return False
+        d = self._unwrap()
+        f = getattr(d, "send_pressure", None)
+        try:
+            return bool(f(kpa)) if callable(f) else False
+        except Exception as e:
+            self.log(f"[!] shim send_pressure failed: {e}")
+            return False
 
-        payload_part_1 = bytes([0x67, 0x64, 0x73, len(payload_part_2)])
-        crc = self.calculate_crc(payload_part_2)
-        full_payload = payload_part_1 + payload_part_2 + crc
-        self.log(f"[→] Sending pressure payload: {full_payload.hex()}")
-        if not self.ep_out:
-            self.log("[✗] Cannot send: OUT endpoint not initialized.")
-            return
+    def read_pressure_kpa(self, timeout_s: float = 0.6):
+        if not self.is_ready():
+            return None
+        d = self._unwrap()
+        f = getattr(d, "read_pressure_kpa", None)
+        try:
+            return f(timeout_s=timeout_s) if callable(f) else None
+        except Exception:
+            return None
 
-        self.dev.write(self.ep_out, full_payload, timeout=100)
-        self.log(f"[→] Sent pressure command: {pressure_kpa} kPa")
+    def read_volume_mm3(self, timeout_s: float = 0.6):
+        if not self.is_ready():
+            return None
+        d = self._unwrap()
+        f = getattr(d, "read_volume_mm3", None)
+        try:
+            return f(timeout_s=timeout_s) if callable(f) else None
+        except Exception:
+            return None
 
-    def send_volume(self, volume_mm3):
-        # From stddpc_usb_volume_payload.py
-        count = round(volume_mm3 / 6.26e-2)
-        full_count_bytes = count.to_bytes(4, 'little', signed=True)
-        payload_part_2 = bytearray(10)
-        payload_part_2[0:2] = (0x0200).to_bytes(2, 'little')
-        payload_part_2[2:4] = (1).to_bytes(2, 'little')  # mode
-        payload_part_2[4:6] = (1).to_bytes(2, 'little')  # channel 1 for volume
-        payload_part_2[6:9] = full_count_bytes[0:3]
-        payload_part_2[9] = 0x00
+    def get_cached_pressure(self, max_age_s: float = 0.5):
+        d = self._unwrap()
+        f = getattr(d, "get_cached_pressure", None)
+        try:
+            return f(max_age_s) if callable(f) else None
+        except Exception:
+            return None
 
-        self.dev.write(self.ep_out, bytes.fromhex("67 64 73 0a"), timeout=100)
-        self.dev.write(self.ep_out, payload_part_2, timeout=100)
-        self.dev.write(self.ep_out, self.calculate_crc(payload_part_2), timeout=100)
-
-        self.log(f"[→] Sent volume command: {volume_mm3} mm³")
-
-    def calculate_crc(self, payload):
-        crc = 0x4489
-        for byte in payload:
-            crc = self.next_crc_byte(crc, byte)
-        return bytes([crc >> 8, crc & 0xFF])
-
-    def next_crc_byte(self, crc, byte):
-        crc ^= byte << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = (crc << 1) ^ 0x1021
-            else:
-                crc <<= 1
-        return crc & 0xFFFF
-
-    def _ftdi_init_sequence(self, dev):
-        def ct(bmRequestType, bRequest, wValue, wIndex, data_or_wLength, label):
-            self.log(f"[TX] {label}")
-            try:
-                result = dev.ctrl_transfer(bmRequestType, bRequest, wValue, wIndex, data_or_wLength)
-                self.log(f"[✓] Success: {label}")
-                return result
-            except usb.core.USBError as e:
-                self.log(f"[✗] Failed: {label} - {e}")
-                return None
-
-        dev.set_configuration()
-        cfg = dev.get_active_configuration()
-        intf = cfg[(0, 0)]
-        usb.util.claim_interface(dev, intf.bInterfaceNumber)
-
-        time.sleep(0.1)
-        ct(0x80, 6, 0x0100, 0x0000, 18, "GET_DESCRIPTOR: DEVICE")
-        ct(0x80, 6, 0x0200, 0x0000, 32, "GET_DESCRIPTOR: CONFIGURATION")
-        ct(0x00, 9, 0x0001, 0x0000, None, "SET_CONFIGURATION")
-
-        time.sleep(0.1)
-        ct(0x40, 0x00, 0x0000, 0x0000, None, "FTDI: Reset (Purge RX/TX)")
-        ct(0xC0, 0x05, 0x0000, 0x0000, 2, "FTDI: GetModemStat")
-        ct(0x40, 0x00, 0x0000, 0x0000, None, "FTDI: Reset (Repeat)")
-        ct(0xC0, 0x05, 0x0000, 0x0000, 2, "FTDI: GetModemStat (Repeat)")
-        ct(0x40, 0x02, 0x0000, 0x0100, None, "FTDI: SetFlowCtrl (RTS/CTS)")
-        ct(0x40, 0x01, 0x0300, 0x0000, None, "FTDI: ModemCtrl")
-        ct(0x40, 0x04, 0x0008, 0x0000, None, "FTDI: SetData")
-        ct(0x40, 0x03, 0x0002, 0x0001, None, "FTDI: SetBaudRate (9600?)")  # ← Confirm this value
-
-        for i in range(10):
-            ct(0x40, 0x00, 0x0000, 0x0000, None, f"FTDI: Extra Reset #{i+1}")
-            time.sleep(0.05)
-
-        self.log("[✓] FTDI/USB Init Sequence Complete.")
+    def get_cached_volume(self, max_age_s: float = 0.5):
+        d = self._unwrap()
+        f = getattr(d, "get_cached_volume", None)
+        try:
+            return f(max_age_s) if callable(f) else None
+        except Exception:
+            return None
 
     def stop(self):
-        stop_cmd = bytes.fromhex("ffffffff676473020320b098ffffffffffffffff")
-        self.dev.write(self.ep_out, stop_cmd, timeout=100)
-        self.log("[→] Sent STDDPC stop command.")
-
-
+        if not self._ensure_ready("stop"):
+            return False
+        d = self._unwrap()
+        for name in ("stop", "abort", "halt"):
+            f = getattr(d, name, None)
+            if callable(f):
+                try:
+                    f()
+                    return True
+                except Exception:
+                    pass
+        return False

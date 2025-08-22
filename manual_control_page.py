@@ -1,200 +1,214 @@
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton, QLineEdit, QGroupBox
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox, QFormLayout,
+    QDoubleSpinBox, QPushButton, QScrollArea, QFrame
 )
-import time
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QFont
+from ftd2xx_controllers.lf50_ftd2xx_controller import FTLoadFrameController
 
 class ManualControlPage(QWidget):
-    def __init__(self, lf_controller=None, back_pressure_controller=None, cell_pressure_controller=None, log=print):
-        super().__init__()
-        self.lf_controller = lf_controller
-        self.back_pressure_controller = back_pressure_controller
-        self.cell_pressure_controller = cell_pressure_controller
-        self.log = log
+    # Signals your MainWindow / hardware layer can connect to
+    send_axial_position_requested = pyqtSignal(float)    # mm
+    send_axial_velocity_requested = pyqtSignal(float)    # mm/min
+    stop_axial_requested          = pyqtSignal()
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(25)
+    send_cell_pressure_requested  = pyqtSignal(float)    # kPa
+    stop_cell_pressure_requested  = pyqtSignal()
 
-        layout.addWidget(self.create_axial_position_box())
-        layout.addWidget(self.create_cell_pressure_box())
-        layout.addWidget(self.create_back_pressure_box())
-        layout.addWidget(self.create_volume_box())
+    send_back_pressure_requested  = pyqtSignal(float)    # kPa
+    stop_back_pressure_requested  = pyqtSignal()
 
-        self.setLayout(layout)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFont(QFont("Segoe UI", 12))
 
-    def set_controllers(self, lf=None, back=None, cell=None):
-        if lf:
-            self.lf_controller = lf
-        if back:
-            self.back_pressure_controller = back
-        if cell:
-            self.cell_pressure_controller = cell
+        # ---- Title ----
+        title_bar = QHBoxLayout()
+        t = QLabel("Manual Control")
+        t.setObjectName("TitleLabel")
+        title_bar.addWidget(t)
+        title_bar.addStretch(1)
 
-        self.refresh_status_labels()  # <== Trigger UI update
+        # ---- Scroll body ----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        scroll.setWidget(body)
+        col = QVBoxLayout(body)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(12)
 
-    def create_axial_position_box(self):
-        group = QGroupBox("Axial Position (Load Frame)")
-        vbox = QVBoxLayout()
+        # ---- Axial Position (Load Frame) ----
+        self.axial_card = QGroupBox("Axial Position (Load Frame)")
+        self.axial_card.setObjectName("Card")
+        axial = QFormLayout(self.axial_card)
+        axial.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        axial.setHorizontalSpacing(12)
+        axial.setVerticalSpacing(8)
+        axial.setContentsMargins(12, 10, 12, 12)
 
-        self.lf_status = QLabel("❌ Not Connected")
-        if self.lf_controller:
-            self.lf_status.setText("✅ Connected")
+        self.axial_status = self._status_badge(False)
+        axial.addRow(QLabel("Status:"), self.axial_status)
 
-        self.axial_input = QLineEdit()
-        self.axial_input.setPlaceholderText("Enter target position (mm)")
-        send_btn = QPushButton("Send Axial Command")
-        send_btn.clicked.connect(self.send_axial_position)
+        self.pos_spin = QDoubleSpinBox()
+        self.pos_spin.setRange(FTLoadFrameController.MIN_POSITION_MM, FTLoadFrameController.MAX_POSITION_MM)
+        self.pos_spin.setDecimals(3)
+        self.pos_spin.setSingleStep(0.1)
+        self.pos_spin.setSuffix(" mm")
+        axial.addRow("Target Position:", self.pos_spin)
 
-        stop_btn = QPushButton("Stop Load Frame")
-        stop_btn.clicked.connect(self.stop_lf50)
+        self.vel_spin = QDoubleSpinBox()
+        self.vel_spin.setRange(FTLoadFrameController.MIN_VELOCITY, FTLoadFrameController.MAX_VELOCITY)
+        self.vel_spin.setDecimals(3)
+        self.vel_spin.setSingleStep(0.1)
+        self.vel_spin.setSuffix(" mm/min")
+        axial.addRow("Target Velocity:", self.vel_spin)
 
-        vbox.addWidget(self.lf_status)
-        vbox.addWidget(QLabel("Target Position:"))
-        vbox.addWidget(self.axial_input)
-        vbox.addWidget(send_btn)
-        vbox.addWidget(stop_btn)
+        ax_btns1 = QHBoxLayout(); ax_btns1.addStretch(1)
+        self.ax_send_pos = QPushButton("Send Axial Position")
+        self.ax_send_vel = QPushButton("Send Axial Velocity")
+        ax_btns1.addWidget(self.ax_send_pos); ax_btns1.addWidget(self.ax_send_vel)
+        axial.addRow(ax_btns1)
 
-        group.setLayout(vbox)
-        return group
+        ax_btns2 = QHBoxLayout(); ax_btns2.addStretch(1)
+        self.ax_stop = QPushButton("Stop Load Frame")
+        ax_btns2.addWidget(self.ax_stop)
+        axial.addRow(ax_btns2)
 
-    def create_cell_pressure_box(self):
-        group = QGroupBox("Cell Pressure Control (STDDPC)")
-        vbox = QVBoxLayout()
+        # ---- Cell Pressure ----
+        self.cell_card = QGroupBox("Cell Pressure Control (STDDPC)")
+        self.cell_card.setObjectName("Card")
+        cell = QFormLayout(self.cell_card)
+        cell.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        cell.setHorizontalSpacing(12)
+        cell.setVerticalSpacing(8)
+        cell.setContentsMargins(12, 10, 12, 12)
 
-        self.cell_pressure_status = QLabel("❌ Not Connected")
-        if self.cell_pressure_controller:
-            self.cell_pressure_status.setText("✅ Connected")
+        self.cell_status = self._status_badge(False)
+        cell.addRow(QLabel("Status:"), self.cell_status)
 
-        self.cell_pressure_input = QLineEdit()
-        self.cell_pressure_input.setPlaceholderText("Enter target pressure (kPa)")
-        send_btn = QPushButton("Send Cell Pressure")
-        send_btn.clicked.connect(self.send_cell_pressure)
+        self.cell_spin = QDoubleSpinBox()
+        self.cell_spin.setRange(-500.0, 5000.0)
+        self.cell_spin.setDecimals(1)
+        self.cell_spin.setSingleStep(5.0)
+        self.cell_spin.setSuffix(" kPa")
+        cell.addRow("Target Pressure:", self.cell_spin)
 
-        stop_btn = QPushButton("Stop Cell Pressure")
-        stop_btn.clicked.connect(self.stop_cell_pressure)
+        c_btns1 = QHBoxLayout(); c_btns1.addStretch(1)
+        self.cell_send = QPushButton("Send Cell Pressure")
+        c_btns1.addWidget(self.cell_send)
+        cell.addRow(c_btns1)
 
-        vbox.addWidget(self.cell_pressure_status)
-        vbox.addWidget(QLabel("Target Pressure:"))
-        vbox.addWidget(self.cell_pressure_input)
-        vbox.addWidget(send_btn)
-        vbox.addWidget(stop_btn)
+        c_btns2 = QHBoxLayout(); c_btns2.addStretch(1)
+        self.cell_stop = QPushButton("Stop Cell Pressure")
+        c_btns2.addWidget(self.cell_stop)
+        cell.addRow(c_btns2)
 
-        group.setLayout(vbox)
-        return group
+        # ---- Back Pressure ----
+        self.back_card = QGroupBox("Back Pressure Control (STDDPC)")
+        self.back_card.setObjectName("Card")
+        back = QFormLayout(self.back_card)
+        back.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        back.setHorizontalSpacing(12)
+        back.setVerticalSpacing(8)
+        back.setContentsMargins(12, 10, 12, 12)
 
-    def create_back_pressure_box(self):
-        group = QGroupBox("Back Pressure Control (STDDPC)")
-        vbox = QVBoxLayout()
+        self.back_status = self._status_badge(False)
+        back.addRow(QLabel("Status:"), self.back_status)
 
-        self.back_pressure_status = QLabel("❌ Not Connected")
-        if self.back_pressure_controller:
-            self.back_pressure_status.setText("✅ Connected")
+        self.back_spin = QDoubleSpinBox()
+        self.back_spin.setRange(-500.0, 5000.0)
+        self.back_spin.setDecimals(1)
+        self.back_spin.setSingleStep(5.0)
+        self.back_spin.setSuffix(" kPa")
+        back.addRow("Target Pressure:", self.back_spin)
 
-        self.back_pressure_input = QLineEdit()
-        self.back_pressure_input.setPlaceholderText("Enter target pressure (kPa)")
-        send_btn = QPushButton("Send Back Pressure")
-        send_btn.clicked.connect(self.send_back_pressure)
+        b_btns1 = QHBoxLayout(); b_btns1.addStretch(1)
+        self.back_send = QPushButton("Send Back Pressure")
+        b_btns1.addWidget(self.back_send)
+        back.addRow(b_btns1)
 
-        stop_btn = QPushButton("Stop Back Pressure")
-        stop_btn.clicked.connect(self.stop_back_pressure)
+        b_btns2 = QHBoxLayout(); b_btns2.addStretch(1)
+        self.back_stop = QPushButton("Stop Back Pressure")
+        b_btns2.addWidget(self.back_stop)
+        back.addRow(b_btns2)
 
-        vbox.addWidget(self.back_pressure_status)
-        vbox.addWidget(QLabel("Target Pressure:"))
-        vbox.addWidget(self.back_pressure_input)
-        vbox.addWidget(send_btn)
-        vbox.addWidget(stop_btn)
+        # Compose
+        col.addWidget(self.axial_card)
+        col.addWidget(self.cell_card)
+        col.addWidget(self.back_card)
+        col.addStretch(1)
 
-        group.setLayout(vbox)
-        return group
+        page = QVBoxLayout(self)
+        page.setContentsMargins(12, 12, 12, 12)
+        page.setSpacing(10)
+        page.addLayout(title_bar)
+        page.addWidget(scroll)
 
-    def create_volume_box(self):
-        group = QGroupBox("Volume Control (via Cell Pressure Controller)")
-        vbox = QVBoxLayout()
+        # Style to match other pages
+        self.setStyleSheet("""
+            QWidget { font-size: 18px; }
+            QLabel#TitleLabel { font-size: 24px; font-weight: 600; }
+            QGroupBox#Card {
+                border: 1px solid #ddd; border-radius: 8px;
+                margin-top: 10px; background: #fff;
+            }
+            QGroupBox#Card::title {
+                subcontrol-origin: margin; left: 12px; top: -2px;
+                padding: 0 4px; font-weight: 600; color: #333;
+            }
+            QPushButton { padding: 8px 12px; font-weight: 500; }
+            QLabel.status-ok  { color: #167c2b; font-weight: 600; }
+            QLabel.status-bad { color: #b01c2e; font-weight: 600; }
+        """)
 
-        self.volume_input = QLineEdit()
-        self.volume_input.setPlaceholderText("Enter target volume (mm³)")
-        send_btn = QPushButton("Send Volume")
-        send_btn.clicked.connect(self.send_volume)
+        # Wire signals
+        self.ax_send_pos.clicked.connect(lambda: self.send_axial_position_requested.emit(self.pos_spin.value()))
+        self.ax_send_vel.clicked.connect(lambda: self.send_axial_velocity_requested.emit(self.vel_spin.value()))
+        self.ax_stop.clicked.connect(self.stop_axial_requested.emit)
 
-        vbox.addWidget(QLabel("Target Volume:"))
-        vbox.addWidget(self.volume_input)
-        vbox.addWidget(send_btn)
+        self.cell_send.clicked.connect(lambda: self.send_cell_pressure_requested.emit(self.cell_spin.value()))
+        self.cell_stop.clicked.connect(self.stop_cell_pressure_requested.emit)
 
-        group.setLayout(vbox)
-        return group
+        self.back_send.clicked.connect(lambda: self.send_back_pressure_requested.emit(self.back_spin.value()))
+        self.back_stop.clicked.connect(self.stop_back_pressure_requested.emit)
 
-    # --- SEND Methods ---
-    def send_axial_position(self):
-        if not self.lf_controller:
-            self.log("[✗] Load Frame not connected.")
-            return
-        try:
-            mm = float(self.axial_input.text())
-            self.lf_controller.send_displacement(mm)
-            self.axial_input.clear()  # Always clear after attempt (or only if no error, up to you)
-        except Exception as e:
-            self.log(f"[✗] Failed to send axial command: {e}")
+        # Start disabled until devices are connected
+        self.set_axial_enabled(False)
+        self.set_cell_enabled(False)
+        self.set_back_enabled(False)
 
-    def send_cell_pressure(self):
-        if not self.cell_pressure_controller:
-            self.log("[✗] Cell Pressure Controller not connected.")
-            return
-        try:
-            kpa = float(self.cell_pressure_input.text())
-            self.cell_pressure_controller.send_pressure(kpa)
-            self.cell_pressure_input.clear()
-        except Exception as e:
-            self.log(f"[✗] Failed to send cell pressure: {e}")
+    # ----- helpers -----
+    def _status_badge(self, ok: bool) -> QLabel:
+        lab = QLabel()
+        self._set_status(lab, ok)
+        return lab
 
-    def send_back_pressure(self):
-        if not self.back_pressure_controller:
-            self.log("[✗] Back Pressure Controller not connected.")
-            return
-        try:
-            kpa = float(self.back_pressure_input.text())
-            self.back_pressure_controller.send_pressure(kpa)
-            self.back_pressure_input.clear()
-        except Exception as e:
-            self.log(f"[✗] Failed to send back pressure: {e}")
+    def _set_status(self, lab: QLabel, ok: bool):
+        lab.setText(("✔ Connected" if ok else "✖ Not Connected"))
+        lab.setObjectName("")  # clear
+        lab.setProperty("class", None)
+        lab.setStyleSheet("")  # reset
+        lab.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        lab.setObjectName("status")
+        lab.setProperty("ok", ok)
+        lab.setClass = ("status-ok" if ok else "status-bad")
+        # apply CSS class via dynamic property is clunky; easiest:
+        lab.setStyleSheet("color:#167c2b;font-weight:600;" if ok else "color:#b01c2e;font-weight:600;")
 
-    def send_volume(self):
-        if not self.cell_pressure_controller:
-            self.log("[✗] Cell Pressure Controller not connected (for volume).")
-            return
-        try:
-            mm3 = float(self.volume_input.text())
-            self.cell_pressure_controller.send_volume(mm3)
-            self.volume_input.clear()
-        except Exception as e:
-            self.log(f"[✗] Failed to send volume command: {e}")
+    # Public API you can call from MainWindow when hardware connects/disconnects
+    def set_axial_enabled(self, enabled: bool):
+        self._set_status(self.axial_status, enabled)
+        for w in (self.pos_spin, self.vel_spin, self.ax_send_pos, self.ax_send_vel, self.ax_stop):
+            w.setEnabled(enabled)
 
-    # --- STOP Methods ---
-    def stop_lf50(self):
-        if self.lf_controller:
-            try:
-                self.lf_controller.stop()
-                self.log("[✓] Stopped LF50 load frame.")
-            except Exception as e:
-                self.log(f"[✗] Error stopping LF50: {e}")
+    def set_cell_enabled(self, enabled: bool):
+        self._set_status(self.cell_status, enabled)
+        for w in (self.cell_spin, self.cell_send, self.cell_stop):
+            w.setEnabled(enabled)
 
-    def stop_cell_pressure(self):
-        if self.cell_pressure_controller:
-            try:
-                self.cell_pressure_controller.stop()
-                self.log("[✓] Stopped Cell Pressure Controller.")
-            except Exception as e:
-                self.log(f"[✗] Error stopping Cell Pressure Controller: {e}")
-
-    def stop_back_pressure(self):
-        if self.back_pressure_controller:
-            try:
-                self.back_pressure_controller.stop()
-                self.log("[✓] Stopped Back Pressure Controller.")
-            except Exception as e:
-                self.log(f"[✗] Error stopping Back Pressure Controller: {e}")
-
-    def refresh_status_labels(self):
-        self.lf_status.setText("✅ Connected" if self.lf_controller else "❌ Not Connected")
-        self.cell_pressure_status.setText("✅ Connected" if self.cell_pressure_controller else "❌ Not Connected")
-        self.back_pressure_status.setText("✅ Connected" if self.back_pressure_controller else "❌ Not Connected")
-
+    def set_back_enabled(self, enabled: bool):
+        self._set_status(self.back_status, enabled)
+        for w in (self.back_spin, self.back_send, self.back_stop):
+            w.setEnabled(enabled)

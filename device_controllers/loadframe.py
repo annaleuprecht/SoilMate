@@ -1,101 +1,109 @@
-import time
-from device_controllers.lf50_movement import LF50Mover
-import usb.core
-import usb.util
+# Shim for LF50 load frame: keeps the old GUI-facing API, delegates to FTDI impl.
+# Place at: device_controllers/loadframe.py
+
+from typing import Optional, Any
+import usb.util  # only needed if GUI still passes a libusb device object
+
+# ⬇️ UPDATE this import/path/class to your actual FTDI load frame controller
+# e.g. from ftd2xx_controllers.lf50_ftd2xx_controller import FTLoadFrameController
+from ftd2xx_controllers.lf50_ftd2xx_controller import FTLoadFrameController
+
+
+def _serial_from_usb_dev(dev: Any) -> str:
+    """Extract serial from a legacy PyUSB device object."""
+    return usb.util.get_string(dev, dev.iSerialNumber)
+
 
 class LoadFrameController:
+    """GUI-facing controller (stable surface)."""
 
     MIN_POSITION_MM = -158.0
     MAX_POSITION_MM = 67.26
-    
-    def __init__(self, log=print):
-        self.dev = None
-        self.serial = None
+    MIN_VELOCITY = -90.0
+    MAX_VELOCITY = 90.0
+
+    def __init__(self, log=print, baud=1_200_000):
         self.log = log
+        self._baud = baud
+        self._impl: Optional[FTLoadFrameController] = None
 
-    def connect(self, ftdi_device=None):
-        if ftdi_device is None:
-            self.log("[✗] No FTDI device provided.")
+        self._lf_min_pos = -50.0
+        self._lf_max_pos =  50.0
+        self._lf_max_vel =  50.0  # mm/min
+
+    def connect(self, ftdi_device=None, usb_device=None, usb_dev=None) -> bool:
+        """
+        Accepts either:
+          - a libusb device object (legacy), or
+          - a serial string (preferred).
+        Opens via ftd2xx by serial.
+        """
+        src = ftdi_device or usb_device or usb_dev
+        if src is None:
+            self.log("[✗] No device provided to connect().")
             return False
 
-        try:
-            self.dev = ftdi_device
-            self.dev.set_configuration()
-            usb.util.claim_interface(self.dev, 0)
-
-            cfg = self.dev.get_active_configuration()
-            intf = cfg[(0, 0)]
-            
-            self.ep_out = usb.util.find_descriptor(
-                intf,
-                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
-            )
-            self.ep_in = usb.util.find_descriptor(
-                intf,
-                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
-            )
-
-            if not self.ep_out or not self.ep_in:
-                self.log("[✗] Failed to find endpoints.")
-                return False
-
-            self.serial = usb.util.get_string(self.dev, self.dev.iSerialNumber)
-            self._initialize_ftdi()
-            self.log(f"[*] Connected to LF50 ({self.serial})")
-            return True
-
-        except Exception as e:
-            self.log(f"[✗] USB connect failed: {e}")
-            return False
-    def _initialize_ftdi(self):
-        def ctrl(bm, req, val, idx, length=None, label=""):
-            self.log(f"[TX] {label}")
+        serial = (
+            _serial_from_usb_dev(src) if hasattr(src, "iSerialNumber") else str(src)
+        )
+        self._impl = FTLoadFrameController(log=self.log, baud=self._baud)
+        ok = self._impl.connect(serial)
+        if ok:
+            self.log(f"[✓] LF50 (FTDI) connected: {serial}")
+            # NEW: immediately push any saved limits into the driver
             try:
-                self.dev.ctrl_transfer(bm, req, val, idx, length)
-                self.log(f"[✓] {label}")
-            except Exception as e:
-                self.log(f"[✗] {label}: {e}")
+                self._impl.set_motion_limits(self._lf_min_pos, self._lf_max_pos, self._lf_max_vel)
+            except Exception:
+                pass
+        else:
+            self.log("[✗] LF50 connect failed")
+        return ok
 
-        time.sleep(0.1)
-        ctrl(0x80, 6, 0x0100, 0x0000, 18, "GET_DESCRIPTOR: DEVICE")
-        ctrl(0x80, 6, 0x0200, 0x0000, 32, "GET_DESCRIPTOR: CONFIGURATION")
-        ctrl(0x00, 9, 0x0001, 0x0000, None, "SET_CONFIGURATION")
-        time.sleep(0.1)
-        ctrl(0x40, 0x00, 0x0000, 0x0000, None, "FTDI: Reset")
-        ctrl(0xC0, 0x05, 0x0000, 0x0000, 2, "FTDI: GetModemStat")
-        ctrl(0x40, 0x04, 0x0008, 0x0000, None, "FTDI: SetData")
-        ctrl(0x40, 0x02, 0x0000, 0x0000, None, "FTDI: SetFlowCtrl")
-        ctrl(0x40, 0x03, 0x4138, 0x0000, None, "FTDI: SetBaudRate")
-        ctrl(0x40, 0x02, 0x0000, 0x0100, None, "FTDI: SetFlowCtrl (RTS/CTS)")
-        ctrl(0x40, 0x01, 0x0202, 0x0000, None, "FTDI: ModemCtrl")
-        ctrl(0x40, 0x04, 0x0008, 0x0000, None, "FTDI: SetData (repeat)")
-        ctrl(0x40, 0x03, 0x0002, 0x0001, None, "FTDI: SetBaudRate (4800)")
-        ctrl(0x40, 0x00, 0x0001, 0x0000, None, "FTDI: Reset (repeat)")
+    def send_displacement(self, position_mm: float, velocity_mm_per_min: float = 10.0):
+        if not self._impl:
+            return self.log("[✗] LF50 not connected.")
+        if not (self.MIN_POSITION_MM <= position_mm <= self.MAX_POSITION_MM):
+            return self.log(
+                f"[✗] Position {position_mm} mm out of range ({self.MIN_POSITION_MM}..{self.MAX_POSITION_MM})."
+            )
+        return self._impl.send_displacement(position_mm, velocity_mm_per_min)
 
-        for _ in range(10):
-            ctrl(0x40, 0x00, 0x0001, 0x0000, None, "FTDI: Reset (extra)")
-            time.sleep(0.05)
-
-        self.log("[✓] FTDI/USB Init Sequence Complete.")
-
-    def send_displacement(self, mm):
-        if not self.dev:
-            self.log("[✗] LF50 not connected.")
-            return
-
-        if mm < self.MIN_POSITION_MM or mm > self.MAX_POSITION_MM:
-            self.log(f"[✗] Displacement {mm} mm out of range ({self.MIN_POSITION_MM} to {self.MAX_POSITION_MM}).")
-            return
-
-        try:
-            mover = LF50Mover(self.dev, log=self.log)
-            mover.send_displacement(mm)
-            self.log(f"[→] Sent displacement command: {mm:.2f} mm")
-        except Exception as e:
-            self.log(f"[✗] Failed to send displacement: {e}")
+    def send_velocity(self, velocity_mm_per_min: float):
+        if not self._impl:
+            return self.log("[✗] LF50 not connected.")
+        if not (self.MIN_VELOCITY <= velocity_mm_per_min <= self.MAX_VELOCITY):
+            return self.log(
+                f"[✗] Velocity {velocity_mm_per_min} mm/min out of range ({self.MIN_VELOCITY}..{self.MAX_VELOCITY})."
+            )
+        return self._impl.send_velocity(velocity_mm_per_min)
 
     def stop(self):
-        if self.dev:
-            mover = LF50Mover(self.dev, log=self.log)
-            mover.stop_motion()
+        if self._impl and hasattr(self._impl, "stop_motion"):
+            return self._impl.stop_motion()
 
+    # NEW: public API used by MainWindow / Device Settings page
+    def set_motion_limits(self, min_pos_mm: float, max_pos_mm: float, max_vel_mm_min: float):
+        self._lf_min_pos = float(min_pos_mm)
+        self._lf_max_pos = float(max_pos_mm)
+        self._lf_max_vel = float(max_vel_mm_min)
+        if self._impl and hasattr(self._impl, "set_motion_limits"):
+            self._impl.set_motion_limits(self._lf_min_pos, self._lf_max_pos, self._lf_max_vel)
+
+    def get_motion_limits(self):
+        if self._impl and hasattr(self._impl, "get_motion_limits"):
+            return self._impl.get_motion_limits()
+        return (self._lf_min_pos, self._lf_max_pos, self._lf_max_vel)
+
+    def list_devices(self):
+        # Works even before connect
+        if self._impl and hasattr(self._impl, "list_devices"):
+            return self._impl.list_devices()
+        try:
+            # fall back to a temp instance
+            return FTLoadFrameController(log=self.log, baud=self._baud).list_devices()
+        except Exception:
+            return []
+
+    def close(self):
+        if self._impl and hasattr(self._impl, "close"):
+            return self._impl.close()
